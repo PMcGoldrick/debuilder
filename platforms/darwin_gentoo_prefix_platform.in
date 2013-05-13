@@ -1,0 +1,158 @@
+#!/bin/false # this script will be sourced by sh(1), not executed.
+# This script is a platform file intended to be used by main.sh
+# This file in particular is for installing gento-prefix in current
+# darwin (Mac OS X ) based systems
+
+platform_bootstrap(){
+    export EPREFIX=/gentoo
+    export PATH=$EPREFIX/usr/bin:$EPREFIX/bin:$EPREFIX/tmp/usr/bin:$EPREFIX/tmp/bin:$PATH
+    export CHOST="x86_64-apple-darwin10"
+    export MAKEOPTS='-j5'
+    # The depths of my rage
+    # Are for you gentoo-prefix
+    # OH GOD, make it stop
+    unset  DYLD_LIBRARY_PATH
+    local pkgs
+    pkgs="make wget sed python coreutils6 findutils tar15 patch9 grep gawk bash"
+    fetch_to_tmp http://overlays.gentoo.org/proj/alt/browser/trunk/prefix-overlay/scripts/bootstrap-prefix.sh?format=txt
+    mv /tmp/bootstrap-prefix.sh?format=txt /tmp/bootstrap-prefix.sh
+    chmod 755 /tmp/bootstrap-prefix.sh
+    /tmp/bootstrap-prefix.sh $EPREFIX tree
+    for pkg in $pkgs; do
+        /tmp/bootstrap-prefix.sh $EPREFIX/tmp $pkg
+    done
+    /tmp/bootstrap-prefix.sh $EPREFIX portage
+}
+
+platform_postbootstrap(){
+    echo "Cleaning up temporary files"
+    rm -f /tmp/bootstrap-prefix.sh
+    echo "Building the native system"
+    hash -r
+    local pkgs
+    pkgs="wget baselayout-prefix m4 flex bison binutils-config"
+    emerge --oneshot sed
+    emerge --oneshot --nodeps bash
+    emerge --oneshot pax-utils
+    emerge --oneshot --nodeps xz-utils
+    emerge --oneshot --nodeps $pkgs
+    # Get the version of apples GCC and put int in an arry
+    read -a VER << HERE
+    $(IFS=.; echo $(gcc -v 2>&1 | grep 'gcc version '| sed -e 's/.*version \([1-9]\.[1-9]\.[1-9]\).*/\1/'))
+HERE
+    # Check to make sure the version is supported, and that we install the
+    # correct version of binutils
+    if [[ ${VER[0]} -eq 4  && ${VER[1]} -eq 2 ]]; then
+        emerge --oneshot --nodeps binutils-apple
+    elif [[ ${VER[0]} -eq 4  && ${VER[1]} -eq 0 ]]; then
+        emerge --oneshot --nodeps =binutils-apple-3.2
+    else
+        throw_error "Unknown gcc version, this script only supports 4.0.1, or 4.2.1"
+        exit 1
+    fi
+    emerge --oneshot --nodeps gcc-config
+    emerge --oneshot --nodeps gcc-apple
+    emerge --oneshot coreutils findutils
+    emerge --oneshot app-arch/tar grep patch gawk make
+    emerge --oneshot --nodeps file eselect
+    emerge --oneshot "<sys-devel/libtool-2"
+    emerge --oneshot sys-devel/libtool
+    env FEATURES="-collision-protect" USE="-aqua" emerge --oneshot portage
+    rm -Rf $EPREFIX/tmp/*
+    hash -r
+    emerge --sync
+    USE=-git emerge -u system
+    hash -r
+}
+
+function platform_install(){
+    mkdir $EPREFIX/usr/local/portage
+    export PORTDIR_OVERLAY=$EPREFIX/usr/local/portage
+    unset DYLD_LIBRARY_PATH
+
+cat > $EPREFIX/etc/make.conf <<- HERE
+CFLAGS="-march=nocona -O2 -pipe"
+CXXFLAGS="${CFLAGS}"
+MAKEOPTS="-j5"
+USE="sqlite -introspection -uuid fortran python branding gif jpeg mng mp3 mp4 mpeg
+ogg opengl pdf png qt3support qt4 sdl spell tiff truetype vorbis unicode
+x264 xml"
+HERE
+
+fmt <<- HERE
+    This is just a sample make.conf, you should REALLY read the gento guide
+    while setting this up.
+HERE
+    echo "Disabling aqua USE flag for python"
+    echo "<=dev-lang/python-2.7.2 -aqua" >> $EPREFIX/etc/portage/package.use
+    read -p 'Edit your make.conf file in another window ${EDITOR} ${EPREFIX}/etc/make.conf' then hit Enter to continue.
+    emerge -e system --autounmask-write
+    FEATURES="-collision-detect -protect-owned" emerge -e system
+    hash -r
+    emerge eix app-portage/portage-utils app-portage/gentoolkit-dev
+    cd $EPREFIX/user/portage
+    $EPREFIX/usr/portage/scripts/ecopy =dev-lang/python-2.6.6-r2
+    cd $EPREFIX
+    eix-sync -e
+    emerge =dev-lang/python-2.6.6-r2
+    # Select python 2.6 and install setuptools
+    # (setuptools aren't required for 2.7)
+    eselect python set 1
+    emerge setuptools
+    hash -r
+    # Not sure why we want this old version vOv
+    easy_install -v http://pypi.python.org/packages/source/p/pip/pip-0.7.2.tar.gz
+    pip install -U virtualenv
+    pip install -U virtualenvwrapper
+    pip install lxml
+    pip install PIL
+    unmask_and_emerge " --nodeps =postgresql-base-9.0.5"
+    unmask_and_emerge "--nodeps =postgresql-server-9.0.5"
+    unmask_and_emerge eselect-postgresql
+    eselect postgresql set 9
+    unmask_and_emerge postgis
+    pip install psycopg2
+}
+
+function platform_postinstall(){
+    # Create the startprefix file
+    $EPREFIX/usr/portage/scripts/bootstrap-prefix.sh $EPREFIX startscript
+    perl -pi -e 's/^(local\s+all\s+postgres\s+)ident/${1}trust/' \
+        $EPREFIX/etc/postgresql-9.0/pg_hba.conf
+    perl -pi -e 's/^(local\s+all\s+all\s+)ident/${1}md5/' \
+        $EPREFIX/etc/postgresql-9.0/pg_hba.conf
+    eselect python set 2
+    # add some things to the startprefix script
+    # export $EPREFIX into env so we can use it later
+    # set DYDL_FALLBACK_LIBRARY_PATH with some paths we need to build
+    # unset DYLD_LIBRARY_PATH because it breaks some things (namely libGIF)
+    sed -e 's/^EPREFIX=/export EPREFIX=/' \
+        -e '/FIX=/ a DYLD_FALLBACK_LIBRARY_PATH=$EPREFIX/usr/lib:$DYLD_LIBRARY_PATH' \
+        -e '/EPREFIX=/ a unset DYLD_LIBRARY_PATH' ${EPREFIX}/startprefix \
+    ## TODO Check if ~/bin exists
+    if [[ -d ~/bin/ ]]; then
+        ln -s ${EPREFIX}/startprefix ~/bin/startprefix
+        chmod 755 ~/bin/startprefix
+    else
+        echo "No $HOME/bin directory, you'll have to run the $EPREFIX/startprefix"
+    fi
+}
+
+function platform_finalize(){
+    echo "Finalizing the platform"
+    rm -Rf $EPREFIX/tmp/*
+}
+
+function install_libbash(){
+    echo "install libbash called"
+}
+
+function unmask_and_emerge() {
+    # If the package has already been unmasked
+    # for whatever reason, the first emerge call
+    # will install it
+    emerge $1 --autounmask-write
+    if [[ -z $(eix $1 | grep '\[I\]') ]]; then
+        emerge $1
+    fi
+}
